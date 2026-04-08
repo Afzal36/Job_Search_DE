@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 
-const API = "https://job-search-de.onrender.com";
+const API = "https://job-search-de-dbpw.vercel.app";
 
 const TYPE_COLORS = {
   "Full-time": { bg: "#EEF2FF", text: "#1a56db" },

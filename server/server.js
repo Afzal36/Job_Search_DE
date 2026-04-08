@@ -8,7 +8,7 @@ const cors      = require("cors");
 
 const app = express();
 app.use(cors({
-  origin: "https://job-search-de.vercel.app"
+  origin: ["https://job-search-de.vercel.app", "http://localhost:5173"]
 }));
 app.use(express.json());
 
