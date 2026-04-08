@@ -7,7 +7,9 @@ const mongoose  = require("mongoose");
 const cors      = require("cors");
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: "https://job-search-de.vercel.app"
+}));
 app.use(express.json());
 
 // ─── DB Connection ─────────────────────────────────────────────────────────────
