@@ -211,6 +211,60 @@ app.post("/import", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN ENDPOINT: Manual CSV Import Trigger
+// GET /admin/import-csv?secret=YOUR_IMPORT_SECRET
+// Manually trigger CSV import if auto-import failed
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get("/admin/import-csv", async (req, res) => {
+  try {
+    const { secret } = req.query;
+    if (secret !== process.env.IMPORT_SECRET) {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    const count = await Job.countDocuments();
+    if (count > 0) {
+      return res.json({ message: `Database already has ${count} jobs, skipping import` });
+    }
+
+    const csvFile = path.resolve(__dirname, "jobs_data.csv");
+    if (!fs.existsSync(csvFile)) {
+      return res.status(404).json({ error: `CSV file not found at ${csvFile}` });
+    }
+
+    const jobs = [];
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(csvFile)
+        .pipe(csv())
+        .on("data", (row) => {
+          jobs.push({
+            company:         row.company || "",
+            category:        row.category || "Other",
+            post_link:       row.post_link || "",
+            job_description: row.job_description || "",
+            location:        row.location || "",
+            location_norm:   normaliseLocation(row.location),
+            date_posted:     row.date_posted ? new Date(row.date_posted) : new Date(),
+            keywords:        row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter(Boolean) : [],
+            title:           extractTitle(row.job_description),
+          });
+        })
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    if (jobs.length === 0) {
+      return res.json({ message: "CSV file is empty" });
+    }
+
+    await Job.insertMany(jobs, { ordered: false });
+    res.json({ message: `Successfully imported ${jobs.length} jobs!`, imported: jobs.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 1. STANDARD FULL-TEXT + FILTER SEARCH   →   GET /search
 //    Params: query, location, company, category, skills, sortBy, page, limit
 // ═══════════════════════════════════════════════════════════════════════════════
