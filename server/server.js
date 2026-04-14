@@ -7,9 +7,6 @@ require("dotenv").config();
 const express  = require("express");
 const mongoose = require("mongoose");
 const cors     = require("cors");
-const fs       = require("fs");
-const path     = require("path");
-const csv      = require("csv-parser");
 
 const app = express();
 app.use(cors({
@@ -123,59 +120,7 @@ function extractTitle(desc = "") {
   return lines[0]?.slice(0, 80) || "Job Opening";
 }
 
-// ─── AUTO-IMPORT ON STARTUP ──────────────────────────────────────────────────────
-// If database is empty and CSV exists, auto-import data on server start
-async function autoImportIfEmpty() {
-  try {
-    const count = await Job.countDocuments();
-    if (count > 0) {
-      console.log(`✅ Database already has ${count} jobs, skipping auto-import`);
-      return;
-    }
 
-    const csvFile = path.resolve(__dirname, "jobs_data.csv");
-    if (!fs.existsSync(csvFile)) {
-      console.log("⚠️  jobs_data.csv not found, skipping auto-import");
-      return;
-    }
-
-    console.log("📥 Database is empty, auto-importing jobs from CSV...");
-    const jobs = [];
-
-    await new Promise((resolve, reject) => {
-      fs.createReadStream(csvFile)
-        .pipe(csv())
-        .on("data", (row) => {
-          jobs.push({
-            company:         row.company || "",
-            category:        row.category || "Other",
-            post_link:       row.post_link || "",
-            job_description: row.job_description || "",
-            location:        row.location || "",
-            location_norm:   normaliseLocation(row.location),
-            date_posted:     row.date_posted ? new Date(row.date_posted) : new Date(),
-            keywords:        row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter(Boolean) : [],
-            title:           extractTitle(row.job_description),
-          });
-        })
-        .on("end", resolve)
-        .on("error", reject);
-    });
-
-    if (jobs.length === 0) {
-      console.log("⚠️  CSV file is empty");
-      return;
-    }
-
-    await Job.insertMany(jobs, { ordered: false });
-    console.log(`✅ Auto-imported ${jobs.length} jobs successfully!`);
-  } catch (err) {
-    console.error("❌ Auto-import error:", err.message);
-  }
-}
-
-// Trigger auto-import after MongoDB connects
-mongoose.connection.once("open", autoImportIfEmpty);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IMPORT ROUTE (one-time use)
