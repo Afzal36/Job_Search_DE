@@ -318,59 +318,108 @@ app.get("/search/boolean", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3. AI SEMANTIC SEARCH   →   POST /search/semantic
 //    Body: { naturalQuery: "remote Python backend engineer" }
-//    Upgraded: calls Anthropic API to extract structured intent
+//    Groq (primary) → Heuristic rules (fallback)
 // ═══════════════════════════════════════════════════════════════════════════════
 app.post("/search/semantic", async (req, res) => {
   try {
     const { naturalQuery, page = 1, limit = 12 } = req.body;
     if (!naturalQuery) return res.status(400).json({ error: "naturalQuery required" });
 
-    // Try Anthropic-powered intent extraction, fall back to heuristic
+    // Try Groq LLM, fall back to heuristic rules
     let intent;
+    let extractionMethod = "unknown";
+    
     try {
+      console.log("[SEARCH] Processing semantic search...");
       intent = await extractIntentLLM(naturalQuery);
-    } catch {
+      extractionMethod = "Groq LLM";
+      console.log("[SEARCH] ✅ Used Groq LLM for extraction");
+    } catch (llmErr) {
+      console.log("[SEARCH] ⚠️  LLM failed, using heuristic fallback");
+      console.log("[SEARCH] Error:", llmErr.message);
       intent = extractIntentHeuristic(naturalQuery);
+      extractionMethod = "Heuristic Rules";
+      console.log("[SEARCH] ✅ Used heuristic rules for extraction");
     }
+    
+    console.log("[SEARCH] Extraction method:", extractionMethod);
+    console.log("[SEARCH] Intent:", JSON.stringify(intent));
 
     const filter = {};
-    if (intent.keywords.length) filter.$text     = { $search: intent.keywords.join(" ") };
-    if (intent.location)        filter.location_norm = { $regex: new RegExp(intent.location, "i") };
-    if (intent.category)        filter.category  = { $regex: new RegExp(intent.category, "i") };
-    if (intent.skills.length)   filter.keywords  = { $all: intent.skills.map((s) => new RegExp(s, "i")) };
+    
+    // Search in keywords array (direct match for LLM-extracted keywords)
+    if (intent.keywords.length) {
+      filter.keywords = { 
+        $in: intent.keywords.map(kw => new RegExp(kw, "i")) 
+      };
+      console.log("[SEARCH] Keywords filter:", filter.keywords);
+    }
+    
+    // Match location (normalized field)
+    if (intent.location) {
+      filter.location_norm = { $regex: new RegExp(intent.location, "i") };
+      console.log("[SEARCH] Location filter:", filter.location_norm);
+    }
+    
+    // Match category
+    if (intent.category) {
+      filter.category = { $regex: new RegExp(intent.category, "i") };
+      console.log("[SEARCH] Category filter:", filter.category);
+    }
+    
+    // Match skills in keywords array
+    if (intent.skills.length) {
+      filter.keywords = { 
+        $in: (filter.keywords?.$in || []).concat(
+          intent.skills.map(s => new RegExp(s, "i"))
+        )
+      };
+      console.log("[SEARCH] Skills filter:", filter.keywords);
+    }
 
+    console.log("[SEARCH] Final MongoDB filter:", JSON.stringify(filter));
+    
     const skip  = (parseInt(page) - 1) * parseInt(limit);
     const total = await Job.countDocuments(filter);
-    const jobs  = await Job.find(
-      filter,
-      intent.keywords.length ? { score: { $meta: "textScore" } } : {}
-    )
-      .sort(intent.keywords.length ? { score: { $meta: "textScore" } } : { date_posted: -1 })
+    const jobs  = await Job.find(filter)
+      .sort({ date_posted: -1 })  // Sort by most recent
       .skip(skip)
       .limit(parseInt(limit))
       .lean();
 
+    console.log("[SEARCH] Found", total, "total jobs,", jobs.length, "on page", page);
+    
     res.json({
       jobs: jobs.map(normalizeJobForFrontend),
       total,
       page: +page,
       pages: Math.ceil(total / parseInt(limit)),
       parsedIntent: intent,
+      extractionMethod,
     });
   } catch (err) {
+    console.log("[SEARCH] ❌ Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 // Heuristic NLP — aligned to dataset categories and real location patterns
 function extractIntentHeuristic(text) {
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("[HEURISTIC] Starting rule-based extraction");
+  console.log("[HEURISTIC] Query:", text);
+  
   const lower = text.toLowerCase();
   const intent = { keywords: [], location: null, skills: [], category: null };
 
   // Location: dataset is mostly US-based + Remote
   const locations = ["remote", "new york", "san francisco", "seattle", "austin", "chicago", "boston", "los angeles", "denver", "atlanta"];
   for (const loc of locations) {
-    if (lower.includes(loc)) { intent.location = loc === "remote" ? "Remote" : cap(loc); break; }
+    if (lower.includes(loc)) { 
+      intent.location = loc === "remote" ? "Remote" : cap(loc);
+      console.log("[HEURISTIC] Location found:", intent.location);
+      break; 
+    }
   }
 
   // Category: matches dataset categories
@@ -387,7 +436,11 @@ function extractIntentHeuristic(text) {
     "management": "Management",
   };
   for (const [kw, cat] of Object.entries(catMap)) {
-    if (lower.includes(kw)) { intent.category = cat; break; }
+    if (lower.includes(kw)) { 
+      intent.category = cat;
+      console.log("[HEURISTIC] Category found:", intent.category);
+      break; 
+    }
   }
 
   // Skills: extended list matching dataset keywords
@@ -400,39 +453,99 @@ function extractIntentHeuristic(text) {
     "flutter", "kotlin", "swift", "android",
   ];
   for (const skill of knownSkills) {
-    if (lower.includes(skill)) intent.skills.push(skill);
+    if (lower.includes(skill)) {
+      intent.skills.push(skill);
+      console.log("[HEURISTIC] Skill found:", skill);
+    }
   }
 
   // Role keywords for full-text search
   const roleKW = ["engineer", "developer", "architect", "lead", "senior", "junior", "intern", "manager", "analyst", "scientist", "designer"];
   for (const kw of roleKW) {
-    if (lower.includes(kw)) intent.keywords.push(kw);
+    if (lower.includes(kw)) {
+      intent.keywords.push(kw);
+      console.log("[HEURISTIC] Keyword found:", kw);
+    }
   }
+
+  console.log("[HEURISTIC] ✅ Extraction complete");
+  console.log("[HEURISTIC] Result:", JSON.stringify(intent));
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
   return intent;
 }
 
-// LLM-powered intent extraction via Anthropic API
+// LLM-powered intent extraction via Groq API (primary)
+async function extractIntentGroq(text) {
+  console.log("[GROQ] Starting Groq API call...");
+  console.log("[GROQ] Query:", text);
+  
+  if (!process.env.GROQ_API_KEY) {
+    console.log("[GROQ] ❌ No GROQ_API_KEY found in environment");
+    throw new Error("No Groq API key");
+  }
+  
+  const startTime = Date.now();
+  try {
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        max_tokens: 256,
+        temperature: 0.3,
+        messages: [
+          {
+            role: "system",
+            content: 'Extract job search intent from the user query. Respond ONLY with valid JSON: {"keywords":[],"location":null,"skills":[],"category":null}. category must be one of: Backend, Frontend, Full Stack, DevOps, Data, Mobile, Sales, PM, Support, Management, Other, or null. skills should be specific technologies. keywords are general role/seniority words.'
+          },
+          { role: "user", content: text }
+        ],
+      }),
+    });
+    
+    const data = await resp.json();
+    const elapsed = Date.now() - startTime;
+    
+    if (data.error) {
+      console.log("[GROQ] ❌ API Error:", data.error.message);
+      throw new Error(data.error.message || "Groq API error");
+    }
+    
+    const raw = data.choices?.[0]?.message?.content || "{}";
+    const intent = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    
+    console.log("[GROQ] ✅ Success in", elapsed + "ms");
+    console.log("[GROQ] Extracted intent:", JSON.stringify(intent));
+    
+    return intent;
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    console.log("[GROQ] ❌ Failed after", elapsed + "ms:", err.message);
+    throw err;
+  }
+}
+
+// LLM intent extraction with Groq primary, heuristic fallback
 async function extractIntentLLM(text) {
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("No API key");
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 256,
-      system:
-        'Extract job search intent from the user query. Respond ONLY with valid JSON: {"keywords":[],"location":null,"skills":[],"category":null}. category must be one of: Backend, Frontend, Full Stack, DevOps, Data, Mobile, Sales, PM, Support, Management, Other, or null. skills should be specific technologies. keywords are general role/seniority words.',
-      messages: [{ role: "user", content: text }],
-    }),
-  });
-  const data = await resp.json();
-  const raw  = data.content?.[0]?.text || "{}";
-  return JSON.parse(raw.replace(/```json|```/g, "").trim());
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("[NLP] Starting intent extraction");
+  console.log("[NLP] Query:", text);
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  
+  try {
+    const intent = await extractIntentGroq(text);
+    console.log("[NLP] ✅ LLM extraction successful (Groq)");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    return intent;
+  } catch (groqErr) {
+    console.log("[NLP] ⚠️  Groq failed, falling back to heuristic rules");
+    console.log("[NLP] Error reason:", groqErr.message);
+    throw groqErr; // Will be caught in semantic search endpoint for heuristic fallback
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
